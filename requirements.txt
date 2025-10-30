@@ -1,0 +1,9 @@
+faiss-cpu
+sentence-transformers
+gradio
+plotly
+numpy
+pandas
+torch
+scikit-learn
+tqdm
