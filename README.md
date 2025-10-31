@@ -1,4 +1,4 @@
-# product-recommendation-system
+# Poduct Recommendation System
 ## 📥 Dataset
 
 The dataset is too large for GitHub (651MB), so download it from Hugging Face:
