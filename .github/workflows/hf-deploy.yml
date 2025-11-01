@@ -1,0 +1,23 @@
+name: Deploy to HuggingFace
+
+on:
+  push:
+    branches: [ main ]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v3
+
+    - name: Install HF CLI
+      run: pip install huggingface_hub
+
+    - name: Login to HF
+      env:
+        HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      run: huggingface-cli login --token $HF_TOKEN
+
+    - name: Upload Repo to HuggingFace Space
+      run: huggingface-cli upload . Ruturaj0077/product-recommendation-system --repo-type=space --local-dir .
