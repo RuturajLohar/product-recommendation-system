@@ -23,12 +23,13 @@ from huggingface_hub import login
 login(token="${HF_TOKEN}")
 EOF
 
-    - name: Upload Repo to HuggingFace Space
+    - name: Upload to Hugging Face Space
       env:
         HF_TOKEN: ${{ secrets.HF_TOKEN }}
       run: |
         python - << 'EOF'
 from huggingface_hub import upload_folder
+
 upload_folder(
     folder_path=".",
     repo_id="Ruturaj0077/product-recommendation-system",
