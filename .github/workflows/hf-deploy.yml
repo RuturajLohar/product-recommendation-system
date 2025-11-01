@@ -12,12 +12,16 @@ jobs:
     - uses: actions/checkout@v3
 
     - name: Install Hugging Face CLI
-      run: pip install "huggingface_hub[cli]"
+      run: pip install huggingface_hub
 
     - name: Login to Hugging Face
       env:
         HF_TOKEN: ${{ secrets.HF_TOKEN }}
-      run: echo "$HF_TOKEN" | huggingface-cli login --token "$HF_TOKEN" --add-to-token-cache
+      run: |
+        python - <<EOF
+        from huggingface_hub import login
+        login(token="${HF_TOKEN}")
+        EOF
 
     - name: Upload Repo to HuggingFace Space
-      run: huggingface-cli upload . Ruturaj0077/product-recommendation-system --repo-type space
+      run: huggingface-cli upload . Ruturaj0077/product-recommendation-system --repo-type=space --local-dir .
