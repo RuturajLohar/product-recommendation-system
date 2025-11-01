@@ -20,4 +20,4 @@ jobs:
       run: huggingface-cli login --token $HF_TOKEN
 
     - name: Upload Repo to HuggingFace Space
-      run: huggingface-cli upload . Ruturaj0077/product-recommendation-system --repo-type=space --local-dir .
+      run: huggingface-cli upload . Ruturaj0077/product-recommendation-system --repo-type space
