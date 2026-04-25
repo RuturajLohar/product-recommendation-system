@@ -1,0 +1,17 @@
+fastapi
+uvicorn
+sqlalchemy
+psycopg2-binary
+aioredis
+qdrant-client
+sentence-transformers
+lightfm
+xgboost
+pandas
+numpy
+pydantic-settings
+python-multipart
+tqdm
+scikit-learn
+gradio
+plotly
