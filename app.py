@@ -20,7 +20,7 @@ warnings.filterwarnings("ignore")
 
 # ==================== CONFIGURATION ====================
 class Config:
-    SAMPLE_SIZE = 15000
+    SAMPLE_SIZE = 5000
     MIN_PRICE = 0.01
     EMBEDDING_DIM = 384
     BATCH_SIZE = 64

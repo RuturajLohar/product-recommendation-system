@@ -2,21 +2,19 @@ FROM python:3.10-slim
 
 WORKDIR /app
 
-# Install system dependencies
+# Install minimal system dependencies for C-extensions (LightFM) and Postgres
 RUN apt-get update && apt-get install -y \
-    build-essential \
+    gcc \
     libpq-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Install python dependencies
+# Pre-install heavy dependencies to leverage Docker cache
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy project
+# Copy only necessary files
 COPY . .
 
-# Expose port
 EXPOSE 8000
 
-# Run FastAPI
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]

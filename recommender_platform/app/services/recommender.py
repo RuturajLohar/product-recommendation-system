@@ -1,4 +1,8 @@
 import numpy as np
+from typing import Dict, List, Optional
+from sqlalchemy.orm import Session
+from ..db import models
+from ..ml.engine.hybrid import HybridEngine
 from ..ml.ranking.ranker import XGBRanker
 
 class RecommenderService:
@@ -36,7 +40,7 @@ class RecommenderService:
         return {
             "user_id": user_id,
             "recommendations": ranked_recs[:limit],
-            "metadata": {"strategy": "xgboost_ranked_hybrid", "candidates_fetched": len(candidates)}
+            "strategy": "xgboost_ranked_hybrid"
         }
 
     async def get_similar_items(self, asin: str, limit: int) -> Dict:
@@ -48,9 +52,9 @@ class RecommenderService:
         candidates = self.engine.search_candidates(embedding, limit=limit)
         
         return {
-            "source_asin": asin,
+            "seed_item": {"asin": asin},
             "recommendations": candidates,
-            "metadata": {"strategy": "content_similarity"}
+            "strategy": "content_similarity"
         }
 
     async def get_trending(self, limit: int) -> Dict:
@@ -60,11 +64,17 @@ class RecommenderService:
             .group_by(models.Item.id)\
             .order_by(models.Item.stars.desc())[:limit]
             
-        recs = [{"asin": item.asin, "title": item.title, "price": item.price} for item in trending_items]
+        recs = [{
+            "asin": item.asin, 
+            "title": item.title, 
+            "price": item.price,
+            "stars": item.stars,
+            "category": item.category
+        } for item in trending_items]
         
         return {
             "recommendations": recs,
-            "metadata": {"strategy": "global_trending"}
+            "strategy": "global_trending"
         }
 
     async def get_bundles(self, asin: str, limit: int) -> Dict:

@@ -6,7 +6,7 @@ import datetime
 Base = declarative_base()
 
 class User(Base):
-    __tablename__ = "users"
+    __tablename__ = "rec_users"
     id = Column(Integer, primary_key=True, index=True)
     external_id = Column(String, unique=True, index=True) # ID from client system
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
@@ -29,7 +29,7 @@ class Item(Base):
 class Interaction(Base):
     __tablename__ = "interactions"
     id = Column(Integer, primary_key=True, index=True)
-    user_id = Column(Integer, ForeignKey("users.id"))
+    user_id = Column(Integer, ForeignKey("rec_users.id"))
     item_id = Column(Integer, ForeignKey("items.id"))
     interaction_type = Column(String) # click, purchase, view
     rating = Column(Float, nullable=True)

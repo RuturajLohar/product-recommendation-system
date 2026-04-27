@@ -1,107 +1,144 @@
+import sys
+import os
 import pandas as pd
 import numpy as np
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.orm import Session
 from qdrant_client import QdrantClient
 from qdrant_client.http import models as qmodels
 from sentence_transformers import SentenceTransformer
 from tqdm import tqdm
-import os
-import sys
 
-# Add app to path to import models
-sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
-from app.db.models import Base, Item, User, Interaction
+# Add app to path to import models and session
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-# Configuration
-DB_URL = "postgresql://admin:secretpassword@localhost:5432/recommender_db"
-QDRANT_HOST = "localhost"
-CSV_PATH = "../amz_uk_processed_data.csv"
-MODEL_NAME = 'all-MiniLM-L12-v2'
+from app.db import models
+from app.db.session import SessionLocal, engine
+from app.core.config import settings
 
-def ingest():
-    print("🚀 Starting Data Ingestion...")
+def ingest_data(csv_path: str, sample_size: int = 5000):
+    print(f"📥 Loading data from {csv_path}...")
+    df = pd.read_csv(csv_path)
+    df = df.sample(min(sample_size, len(df)), random_state=42)
     
-    # 1. Setup Connections
-    engine = create_engine(DB_URL)
-    Session = sessionmaker(bind=engine)
-    session = Session()
+    # Clean up
+    df['price'] = pd.to_numeric(df['price'], errors='coerce').fillna(0.0)
+    df['stars'] = pd.to_numeric(df['stars'], errors='coerce').fillna(0.0)
+    df['categoryName'] = df['categoryName'].fillna("Unknown")
     
-    q_client = QdrantClient(host=QDRANT_HOST, port=6333)
-    model = SentenceTransformer(MODEL_NAME)
+    db: Session = SessionLocal()
+    q_client = QdrantClient(host=settings.QDRANT_HOST, port=settings.QDRANT_PORT)
     
-    # 2. Create Tables & Collection
-    Base.metadata.create_all(engine)
+    # 1. Setup Qdrant Collection
+    collection_name = "products"
+    vector_size = 384 # SBERT miniLM
     
     q_client.recreate_collection(
-        collection_name="products",
-        vectors_config=qmodels.VectorParams(size=384, distance=qmodels.Distance.IP),
+        collection_name=collection_name,
+        vectors_config=qmodels.VectorParams(size=vector_size, distance=qmodels.Distance.COSINE),
     )
     
-    # 3. Load Data
-    if not os.path.exists(CSV_PATH):
-        print(f"❌ CSV not found at {CSV_PATH}. Please ensure the file exists.")
-        return
-
-    df = pd.read_csv(CSV_PATH).head(5000) # Sample for speed in demo
-    print(f"📈 Processing {len(df)} items...")
-
-    items_to_add = []
-    points = []
-
-    for i, row in tqdm(df.iterrows(), total=len(df)):
-        # Create DB Item
-        item = Item(
-            asin=row['asin'],
-            title=row['title'],
-            category=row.get('categoryName', 'Unknown'),
+    print("🧠 Initializing SBERT model...")
+    model = SentenceTransformer('all-MiniLM-L6-v2')
+    
+    print("🚀 Starting ingestion...")
+    
+    items_to_save = []
+    
+    for i, row in tqdm(df.iterrows(), total=len(df), desc="Processing items"):
+        # a. Create Postgres Record
+        item = models.Item(
+            asin=str(row['asin']),
+            title=str(row['title']),
+            category=str(row['categoryName']),
             price=float(row['price']),
-            stars=float(row.get('stars', 0)),
-            img_url=row.get('imgUrl', '')
+            stars=float(row['stars']),
+            img_url=str(row.get('imgUrl', ''))
         )
-        items_to_add.append(item)
+        items_to_save.append(item)
         
-        # Prepare Qdrant Point
-        emb = model.encode(str(row['title'])).tolist()
-        points.append(qmodels.PointStruct(
-            id=i,
-            vector=emb,
-            payload={
-                "asin": row['asin'],
-                "title": row['title'],
-                "category": row.get('categoryName', 'Unknown'),
-                "price": float(row['price']),
-                "stars": float(row.get('stars', 0)),
-                "popularity_score": float(row.get('boughtInLastMonth', 0))
-            }
-        ))
+        # We'll batch save to Postgres and Qdrant for speed
+        if len(items_to_save) >= 100:
+            # Postgres
+            db.add_all(items_to_save)
+            db.commit()
+            
+            # Qdrant
+            titles = [it.title for it in items_to_save]
+            asins = [it.asin for it in items_to_save]
+            embeddings = model.encode(titles).tolist()
+            
+            q_client.upsert(
+                collection_name=collection_name,
+                points=[
+                    qmodels.PointStruct(
+                        id=hash(asin) & 0xFFFFFFFFFFFFFFFF, # Simplistic ID mapping
+                        vector=emb,
+                        payload={
+                            "asin": asin,
+                            "title": title,
+                            "category": cat,
+                            "price": price
+                        }
+                    )
+                    for asin, title, emb, cat, price in zip(
+                        asins, 
+                        titles, 
+                        embeddings, 
+                        [it.category for it in items_to_save],
+                        [it.price for it in items_to_save]
+                    )
+                ]
+            )
+            items_to_save = []
 
-    # 4. Batch Upload
-    print("💾 Saving to PostgreSQL...")
-    session.add_all(items_to_add)
-    session.commit()
+    # Final batch
+    if items_to_save:
+        db.add_all(items_to_save)
+        db.commit()
+        
+    print("✅ Items ingested into Postgres and Qdrant.")
     
-    print("🧠 Uploading to Qdrant...")
-    q_client.upsert(collection_name="products", points=points)
+    # 2. Simulate Users and Interactions
+    print("👤 Creating synthetic users and interactions...")
+    # Create 100 users
+    users = []
+    for i in range(100):
+        user = models.User(external_id=f"USER_{i}")
+        users.append(user)
+    db.add_all(users)
+    db.commit()
     
-    # 5. Create Mock User & Interactions
-    print("👤 Creating mock user 'user_demo'...")
-    user = User(external_id="user_demo")
-    session.add(user)
-    session.commit()
+    # Get all items from DB to link them
+    db_items = db.query(models.Item).all()
+    item_ids = [it.id for it in db_items]
+    user_ids = [u.id for u in users]
     
-    # Add some interactions for the user
-    for item in items_to_add[:5]:
-        interaction = Interaction(
-            user_id=user.id,
-            item_id=item.id,
-            interaction_type="view",
-            rating=5.0
+    interactions = []
+    for _ in range(5000):
+        uid = np.random.choice(user_ids)
+        iid = np.random.choice(item_ids)
+        itype = np.random.choice(['view', 'click', 'purchase'], p=[0.7, 0.2, 0.1])
+        
+        interaction = models.Interaction(
+            user_id=uid,
+            item_id=iid,
+            interaction_type=itype,
+            timestamp=pd.Timestamp.now() - pd.Timedelta(days=np.random.randint(0, 30))
         )
-        session.add(interaction)
-    session.commit()
-
-    print("✅ Ingestion Complete!")
+        interactions.append(interaction)
+        
+        if len(interactions) >= 500:
+            db.add_all(interactions)
+            db.commit()
+            interactions = []
+            
+    if interactions:
+        db.add_all(interactions)
+        db.commit()
+        
+    print("✅ Users and Interactions ingested.")
+    db.close()
 
 if __name__ == "__main__":
-    ingest()
+    csv_path = "amz_uk_processed_data.csv"
+    ingest_data(csv_path)

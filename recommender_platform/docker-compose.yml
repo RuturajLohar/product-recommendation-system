@@ -40,6 +40,9 @@ services:
       - "8000:8000"
     environment:
       - DATABASE_URL=postgresql://admin:secretpassword@db:5432/recommender_db
+      - POSTGRES_USER=admin
+      - POSTGRES_PASSWORD=secretpassword
+      - POSTGRES_DB=recommender_db
       - QDRANT_HOST=qdrant
       - REDIS_HOST=redis
     volumes:
