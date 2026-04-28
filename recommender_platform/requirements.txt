@@ -6,7 +6,6 @@ uvicorn
 sqlalchemy
 psycopg2-binary
 qdrant-client
-lightfm
 xgboost
 pandas
 numpy
@@ -15,3 +14,4 @@ python-multipart
 tqdm
 scikit-learn
 gradio
+redis

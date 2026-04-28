@@ -1,48 +1,76 @@
-# Poduct Recommendation System
-## 📥 Dataset
+# Product Recommendation System (EliteRec)
 
-The dataset is too large for GitHub (651MB), so download it from Hugging Face:
+This repo contains **EliteRec**, a full-stack product recommendation platform:
 
-🔗 https://huggingface.co/spaces/Ruturaj0077/product-recommendation-system
+- **Backend**: FastAPI + Postgres + Qdrant + Redis (`recommender_platform/app/`)
+- **Frontend**: React (Vite + Tailwind) (`recommender_platform/frontend-react/`)
+- **Catalog**: loaded from `amz_uk_processed_data.csv` (no synthetic seeding)
 
-pip install huggingface_hub
-huggingface-cli download Ruturaj0077/product-recommendation-system --repo-type=space --local-dir ./data
+## Quickstart (Docker)
 
+From the repo root:
 
-Advanced Product Recommendation System using FAISS, Sentence-BERT, and LightFM with Gradio Interface
+```bash
+cd recommender_platform
+cp .env.example .env
+docker compose down -v
+docker compose up -d --build db qdrant redis api
+docker compose run --rm api python scripts/ingest_data.py --csv /app/data/amz_uk_processed_data.csv
+```
 
-* Features
+Start the frontend:
 
-🔍 Content-based product recommendations
+```bash
+cd recommender_platform/frontend-react
+npm i
+npm run dev
+```
 
-🧠 Sentence-Transformer embeddings
+Open:
 
-⚡ Fast FAISS vector search
+- API docs: `http://127.0.0.1:8000/docs`
+- Frontend: `http://127.0.0.1:5173`
 
-🛠️ Clean & modular code
+## Professional Project Layout
 
-☁️ Hugging Face deployment (auto-updates via GitHub)
+```text
+recommender_platform/
+  app/                   # FastAPI backend (API, DB, ML, services)
+  scripts/               # Operational scripts (ingestion/seeding)
+  frontend-react/        # React frontend
+  data/                  # Local mounted data files (gitignored)
+  docker-compose.yml     # Multi-service local stack
+  .env.example           # Backend/infra env template
+  Makefile               # Common dev commands
+```
 
-* Tech Stack
-Area	               Tools
-Language		         Python
-ML                   Sentence-Transformers, FAISS
-Data		             Pandas, NumPy
-Deployment	         Hugging Face Spaces
-Version Control	     Git, GitHub
+## One-command local dev (watch mode)
 
-* Future Enhancements
-  
-1. Hybrid recommendation engine (Content + Collaborative)
-2. Web UI improvements
-3. Integration with cloud DB (MongoDB / Firestore)
-4. Add evaluation metrics
+```bash
+cd recommender_platform
+cp .env.example .env
+docker compose up --build --watch
+```
 
-👤 Author
+## Optional helper commands
 
-Ruturaj Lohar
-🔗 LinkedIn: https://www.linkedin.com/in/ruturajlohar07/
+```bash
+cd recommender_platform
+make up
+make ingest
+make logs
+```
 
-⭐ Support
+## Useful API endpoints
 
-If you found this useful, please ⭐ star the repo — it motivates future improvements!
+- `GET /health`
+- `GET /api/v1/recommend/trending?limit=8`
+- `GET /api/v1/recommend/user/{USER_ID}?limit=5`
+- `GET /api/v1/items?q=echo&limit=8`
+- `POST /api/v1/events` body: `{ "user_id": "USER_0", "asin": "B09B96TG33", "type": "click" }`
+
+## Notes
+
+- Configure the frontend API base via `VITE_API_BASE` (defaults to `http://127.0.0.1:8000/api/v1`).
+- Ingestion is **idempotent** (upserts by `asin`) and uses deterministic Qdrant point IDs.
+- Local secrets/config now come from `recommender_platform/.env` (copy from `.env.example`).

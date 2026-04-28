@@ -1,33 +1,45 @@
 import numpy as np
-import pandas as pd
-from typing import List, Dict, Any, Optional
+from typing import Any, Dict, List
 from sentence_transformers import SentenceTransformer
-from lightfm import LightFM
 from qdrant_client import QdrantClient
-from qdrant_client.http import models as qmodels
 from sklearn.metrics.pairwise import cosine_similarity
 
+from ...core.config import settings
+
 class HybridEngine:
-    def __init__(self, 
-                 qdrant_host: str = "localhost", 
-                 model_name: str = 'all-MiniLM-L12-v2'):
-        self.sbert = SentenceTransformer(model_name)
-        self.q_client = QdrantClient(host=qdrant_host, port=6333)
+    def __init__(self):
+        self.sbert = SentenceTransformer(settings.SBERT_MODEL)
+        self.q_client = QdrantClient(host=settings.QDRANT_HOST, port=settings.QDRANT_PORT)
         self.collection_name = "products"
-        self.lfm_model = LightFM(loss='warp')
         
     def get_embedding(self, text: str) -> np.ndarray:
         return self.sbert.encode(text).tolist()
 
+    def get_user_embedding(self, titles: List[str]) -> List[float]:
+        if not titles:
+            return self.get_embedding("")
+        vecs = np.asarray(self.sbert.encode(titles))
+        mean_vec = vecs.mean(axis=0)
+        return mean_vec.astype(np.float32).tolist()
+
     def search_candidates(self, vector: List[float], limit: int = 100) -> List[Dict]:
         """Fetch candidates from Qdrant"""
-        search_result = self.q_client.search(
+        search_result = self.q_client.query_points(
             collection_name=self.collection_name,
-            query_vector=vector,
+            query=vector,
             limit=limit,
-            with_payload=True
+            with_payload=True,
+            with_vectors=True,
         )
-        return [hit.payload for hit in search_result]
+        candidates: List[Dict[str, Any]] = []
+        for hit in (search_result.points or []):
+            payload = hit.payload or {}
+            # Preserve score and vector for ranking/diversity.
+            payload = dict(payload)
+            payload["score"] = float(hit.score) if hit.score is not None else 0.0
+            payload["_vector"] = hit.vector
+            candidates.append(payload)
+        return candidates
 
     def mmr_rerank(self, 
                    query_vector: np.ndarray, 

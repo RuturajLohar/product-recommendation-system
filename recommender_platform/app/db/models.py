@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Float, DateTime, ForeignKey, Text
+from sqlalchemy import Column, Integer, String, Float, DateTime, ForeignKey, Text, Boolean
 from sqlalchemy.orm import relationship
 from sqlalchemy.ext.declarative import declarative_base
 import datetime
@@ -21,6 +21,10 @@ class Item(Base):
     category = Column(String, index=True)
     price = Column(Float)
     stars = Column(Float)
+    reviews = Column(Integer, default=0)
+    bought_in_last_month = Column(Integer, default=0)
+    is_best_seller = Column(Boolean, default=False)
+    product_url = Column(String, nullable=True)
     description = Column(Text, nullable=True)
     img_url = Column(String, nullable=True)
     

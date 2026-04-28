@@ -1,45 +1,77 @@
 import numpy as np
-from typing import Dict, List, Optional
+from typing import Any, Dict, List
+from sqlalchemy import case, desc, func
 from sqlalchemy.orm import Session
+
 from ..db import models
 from ..ml.engine.hybrid import HybridEngine
 from ..ml.ranking.ranker import XGBRanker
 
 class RecommenderService:
-    def __init__(self, db: Session):
+    def __init__(self, db: Session, engine: HybridEngine, ranker: XGBRanker):
         self.db = db
-        self.engine = HybridEngine(qdrant_host="qdrant")
-        self.ranker = XGBRanker()
+        self.engine = engine
+        self.ranker = ranker
+
+    def _normalize_candidate(self, cand: Dict[str, Any]) -> Dict[str, Any]:
+        # Ensure all response fields exist for the frontend/schema.
+        out = dict(cand)
+        out.setdefault("reviews", 0)
+        out.setdefault("bought_in_last_month", 0)
+        out.setdefault("is_best_seller", False)
+        out.setdefault("product_url", None)
+        out.setdefault("img_url", None)
+        return out
         
     async def get_personalized_recs(self, user_id: str, limit: int) -> Dict:
-        # 1. Fetch user features
         user = self.db.query(models.User).filter(models.User.external_id == user_id).first()
         if not user:
             return await self.get_trending(limit)
             
-        # 2. Get user history for ranking features
-        history = self.db.query(models.Item)\
-            .join(models.Interaction)\
-            .filter(models.Interaction.user_id == user.id)\
-            .order_by(models.Interaction.timestamp.desc()).all()
+        history = (
+            self.db.query(models.Item)
+            .join(models.Interaction)
+            .filter(models.Interaction.user_id == user.id)
+            .order_by(models.Interaction.timestamp.desc())
+            .limit(10)
+            .all()
+        )
             
         if not history:
             return await self.get_trending(limit)
             
-        # 3. Retrieval
-        query_item = history[0]
-        embedding = self.engine.get_embedding(query_item.title)
+        # Retrieval from mean-pooled user embedding
+        titles = [h.title for h in history if h.title]
+        embedding = self.engine.get_user_embedding(titles)
         candidates = self.engine.search_candidates(embedding, limit=50)
         
-        # 4. Ranking (XGBoost)
-        user_hist_dicts = [{"category": h.category} for h in history]
-        query_dict = {"price": query_item.price, "category": query_item.category}
+        # Ranking (heuristic fallback if model not trained)
+        user_hist_dicts = [{"category": h.category or "Unknown"} for h in history]
+        query_item = history[0]
+        query_dict = {"price": float(query_item.price or 0.0), "category": query_item.category or "Unknown"}
         
         ranked_recs = self.ranker.rank(query_dict, candidates, user_hist_dicts)
+
+        # Diversity rerank (MMR) using vectors returned from Qdrant
+        cand_vecs = [c.get("_vector") for c in ranked_recs if c.get("_vector") is not None]
+        cand_no_vec = [c for c in ranked_recs if c.get("_vector") is None]
+        diverse: List[Dict[str, Any]] = []
+        if cand_vecs:
+            candidate_vectors = np.asarray(cand_vecs, dtype=np.float32)
+            diverse = self.engine.mmr_rerank(
+                query_vector=np.asarray(embedding, dtype=np.float32),
+                candidates=[c for c in ranked_recs if c.get("_vector") is not None],
+                candidate_vectors=candidate_vectors,
+                top_k=limit,
+                lambda_param=0.7,
+            )
+
+        final = (diverse + cand_no_vec)[:limit]
+        final = [self._normalize_candidate(c) for c in final]
         
         return {
             "user_id": user_id,
-            "recommendations": ranked_recs[:limit],
+            "recommendations": final,
             "strategy": "xgboost_ranked_hybrid"
         }
 
@@ -50,6 +82,7 @@ class RecommenderService:
             
         embedding = self.engine.get_embedding(item.title)
         candidates = self.engine.search_candidates(embedding, limit=limit)
+        candidates = [self._normalize_candidate(c) for c in candidates]
         
         return {
             "seed_item": {"asin": asin},
@@ -58,19 +91,38 @@ class RecommenderService:
         }
 
     async def get_trending(self, limit: int) -> Dict:
-        # Simple popularity based on interaction counts in last 7 days
-        trending_items = self.db.query(models.Item)\
-            .join(models.Interaction)\
-            .group_by(models.Item.id)\
-            .order_by(models.Item.stars.desc())[:limit]
-            
-        recs = [{
-            "asin": item.asin, 
-            "title": item.title, 
-            "price": item.price,
-            "stars": item.stars,
-            "category": item.category
-        } for item in trending_items]
+        is_best_seller_int = case((models.Item.is_best_seller.is_(True), 1), else_=0)
+        score_expr = (
+            0.55 * func.ln(func.coalesce(models.Item.bought_in_last_month, 0) + 1)
+            + 0.25 * func.coalesce(models.Item.stars, 0)
+            + 0.15 * func.ln(func.coalesce(models.Item.reviews, 0) + 1)
+            + 0.05 * is_best_seller_int
+        ).label("trend_score")
+
+        rows = (
+            self.db.query(models.Item, score_expr)
+            .order_by(desc(score_expr), desc(models.Item.stars))
+            .limit(limit)
+            .all()
+        )
+
+        recs: List[Dict[str, Any]] = []
+        for item, score in rows:
+            recs.append(
+                {
+                    "asin": item.asin,
+                    "title": item.title,
+                    "price": item.price,
+                    "stars": item.stars,
+                    "category": item.category,
+                    "reviews": item.reviews or 0,
+                    "bought_in_last_month": item.bought_in_last_month or 0,
+                    "is_best_seller": bool(item.is_best_seller),
+                    "product_url": item.product_url,
+                    "img_url": item.img_url,
+                    "score": float(score) if score is not None else None,
+                }
+            )
         
         return {
             "recommendations": recs,
@@ -78,5 +130,8 @@ class RecommenderService:
         }
 
     async def get_bundles(self, asin: str, limit: int) -> Dict:
-        # Placeholder for Association Rule Mining / Co-occurrence logic
-        return await self.get_similar_items(asin, limit)
+        # v1: similar items, but favor best sellers until co-purchase data exists.
+        base = await self.get_similar_items(asin, limit=limit * 3)
+        recs = base.get("recommendations", [])
+        recs = sorted(recs, key=lambda r: (r.get("is_best_seller", False), r.get("score", 0.0)), reverse=True)[:limit]
+        return {"seed_item": {"asin": asin}, "recommendations": recs, "strategy": "bundle_v1_best_seller_filtered"}

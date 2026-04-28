@@ -1,144 +1,244 @@
-import sys
+import argparse
+import hashlib
 import os
-import pandas as pd
+import sys
+from typing import Any, Dict, Iterable, List, Optional, Tuple
+
 import numpy as np
-from sqlalchemy.orm import Session
+import pandas as pd
 from qdrant_client import QdrantClient
 from qdrant_client.http import models as qmodels
 from sentence_transformers import SentenceTransformer
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.orm import Session
 from tqdm import tqdm
 
 # Add app to path to import models and session
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from app.core.config import settings
 from app.db import models
 from app.db.session import SessionLocal, engine
-from app.core.config import settings
 
-def ingest_data(csv_path: str, sample_size: int = 5000):
-    print(f"📥 Loading data from {csv_path}...")
-    df = pd.read_csv(csv_path)
-    df = df.sample(min(sample_size, len(df)), random_state=42)
-    
-    # Clean up
-    df['price'] = pd.to_numeric(df['price'], errors='coerce').fillna(0.0)
-    df['stars'] = pd.to_numeric(df['stars'], errors='coerce').fillna(0.0)
-    df['categoryName'] = df['categoryName'].fillna("Unknown")
-    
+
+COLLECTION_NAME = "products"
+
+
+def _deterministic_point_id(asin: str) -> int:
+    # Stable across runs/machines (unlike Python's built-in hash()).
+    return int(hashlib.md5(asin.encode("utf-8")).hexdigest()[:16], 16)
+
+
+def _clean_bool(val: Any) -> bool:
+    if val is None:
+        return False
+    if isinstance(val, bool):
+        return val
+    s = str(val).strip().lower()
+    return s in {"true", "1", "yes", "y", "t"}
+
+
+def _clean_int(val: Any) -> int:
+    try:
+        if val is None or (isinstance(val, float) and np.isnan(val)):
+            return 0
+        return int(float(val))
+    except Exception:
+        return 0
+
+
+def _clean_float(val: Any) -> float:
+    try:
+        if val is None or (isinstance(val, float) and np.isnan(val)):
+            return 0.0
+        return float(val)
+    except Exception:
+        return 0.0
+
+
+def _clean_str(val: Any) -> str:
+    if val is None:
+        return ""
+    if isinstance(val, float) and np.isnan(val):
+        return ""
+    s = str(val).strip()
+    if s.lower() == "nan":
+        return ""
+    return s
+
+
+def _iter_valid_rows(df: pd.DataFrame) -> Iterable[Dict[str, Any]]:
+    for _, row in df.iterrows():
+        asin = _clean_str(row.get("asin"))
+        title = _clean_str(row.get("title"))
+        img_url = _clean_str(row.get("imgUrl"))
+        category = _clean_str(row.get("categoryName")) or "Unknown"
+        product_url = _clean_str(row.get("productURL"))
+        price = _clean_float(row.get("price"))
+        stars = _clean_float(row.get("stars"))
+        reviews = _clean_int(row.get("reviews"))
+        bought = _clean_int(row.get("boughtInLastMonth"))
+        is_best_seller = _clean_bool(row.get("isBestSeller"))
+
+        if not asin or not title or price <= 0:
+            continue
+        # Keep img_url optional, but normalize empty to None downstream.
+        yield {
+            "asin": asin,
+            "title": title,
+            "category": category,
+            "price": price,
+            "stars": stars,
+            "reviews": reviews,
+            "bought_in_last_month": bought,
+            "is_best_seller": is_best_seller,
+            "product_url": product_url or None,
+            "img_url": img_url or None,
+        }
+
+
+def _ensure_collection(q_client: QdrantClient, vector_size: int, reset: bool) -> None:
+    if reset:
+        q_client.recreate_collection(
+            collection_name=COLLECTION_NAME,
+            vectors_config=qmodels.VectorParams(size=vector_size, distance=qmodels.Distance.COSINE),
+        )
+        return
+
+    collections = {c.name for c in q_client.get_collections().collections}
+    if COLLECTION_NAME not in collections:
+        q_client.create_collection(
+            collection_name=COLLECTION_NAME,
+            vectors_config=qmodels.VectorParams(size=vector_size, distance=qmodels.Distance.COSINE),
+        )
+
+
+def _upsert_items(db: Session, rows: List[Dict[str, Any]]) -> None:
+    if not rows:
+        return
+
+    stmt = pg_insert(models.Item).values(rows)
+    update_cols = {
+        "title": stmt.excluded.title,
+        "category": stmt.excluded.category,
+        "price": stmt.excluded.price,
+        "stars": stmt.excluded.stars,
+        "reviews": stmt.excluded.reviews,
+        "bought_in_last_month": stmt.excluded.bought_in_last_month,
+        "is_best_seller": stmt.excluded.is_best_seller,
+        "product_url": stmt.excluded.product_url,
+        "img_url": stmt.excluded.img_url,
+    }
+    stmt = stmt.on_conflict_do_update(index_elements=["asin"], set_=update_cols)
+    db.execute(stmt)
+
+
+def _upsert_qdrant(
+    q_client: QdrantClient,
+    rows: List[Dict[str, Any]],
+    vectors: List[List[float]],
+) -> None:
+    points: List[qmodels.PointStruct] = []
+    for row, vec in zip(rows, vectors):
+        asin = row["asin"]
+        payload = dict(row)
+        points.append(
+            qmodels.PointStruct(
+                id=_deterministic_point_id(asin),
+                vector=vec,
+                payload=payload,
+            )
+        )
+    q_client.upsert(collection_name=COLLECTION_NAME, points=points)
+
+
+def ingest_data(
+    csv_path: str,
+    sample_size: int,
+    chunksize: int,
+    batch_size: int,
+    reset: bool,
+) -> None:
+    print(f"Loading CSV: {csv_path}")
+    models.Base.metadata.create_all(bind=engine)
+
     db: Session = SessionLocal()
     q_client = QdrantClient(host=settings.QDRANT_HOST, port=settings.QDRANT_PORT)
-    
-    # 1. Setup Qdrant Collection
-    collection_name = "products"
-    vector_size = 384 # SBERT miniLM
-    
-    q_client.recreate_collection(
-        collection_name=collection_name,
-        vectors_config=qmodels.VectorParams(size=vector_size, distance=qmodels.Distance.COSINE),
-    )
-    
-    print("🧠 Initializing SBERT model...")
-    model = SentenceTransformer('all-MiniLM-L6-v2')
-    
-    print("🚀 Starting ingestion...")
-    
-    items_to_save = []
-    
-    for i, row in tqdm(df.iterrows(), total=len(df), desc="Processing items"):
-        # a. Create Postgres Record
-        item = models.Item(
-            asin=str(row['asin']),
-            title=str(row['title']),
-            category=str(row['categoryName']),
-            price=float(row['price']),
-            stars=float(row['stars']),
-            img_url=str(row.get('imgUrl', ''))
-        )
-        items_to_save.append(item)
-        
-        # We'll batch save to Postgres and Qdrant for speed
-        if len(items_to_save) >= 100:
-            # Postgres
-            db.add_all(items_to_save)
-            db.commit()
-            
-            # Qdrant
-            titles = [it.title for it in items_to_save]
-            asins = [it.asin for it in items_to_save]
-            embeddings = model.encode(titles).tolist()
-            
-            q_client.upsert(
-                collection_name=collection_name,
-                points=[
-                    qmodels.PointStruct(
-                        id=hash(asin) & 0xFFFFFFFFFFFFFFFF, # Simplistic ID mapping
-                        vector=emb,
-                        payload={
-                            "asin": asin,
-                            "title": title,
-                            "category": cat,
-                            "price": price
-                        }
-                    )
-                    for asin, title, emb, cat, price in zip(
-                        asins, 
-                        titles, 
-                        embeddings, 
-                        [it.category for it in items_to_save],
-                        [it.price for it in items_to_save]
-                    )
-                ]
-            )
-            items_to_save = []
 
-    # Final batch
-    if items_to_save:
-        db.add_all(items_to_save)
+    print(f"Initializing SBERT: {settings.SBERT_MODEL}")
+    model = SentenceTransformer(settings.SBERT_MODEL)
+    vector_size = int(model.get_sentence_embedding_dimension())
+
+    _ensure_collection(q_client, vector_size=vector_size, reset=reset)
+
+    ingested = 0
+    buffered_rows: List[Dict[str, Any]] = []
+
+    reader = pd.read_csv(csv_path, chunksize=chunksize)
+    for chunk in tqdm(reader, desc="Streaming CSV chunks"):
+        for row in _iter_valid_rows(chunk):
+            buffered_rows.append(row)
+            if len(buffered_rows) >= batch_size:
+                # 1) Postgres upsert
+                _upsert_items(db, buffered_rows)
+                db.commit()
+
+                # 2) Qdrant upsert
+                texts = [f"{r['title']}. Category: {r['category']}" for r in buffered_rows]
+                vectors = model.encode(texts, batch_size=batch_size, show_progress_bar=False).tolist()
+                _upsert_qdrant(q_client, buffered_rows, vectors=vectors)
+
+                ingested += len(buffered_rows)
+                buffered_rows = []
+
+                if sample_size > 0 and ingested >= sample_size:
+                    break
+        if sample_size > 0 and ingested >= sample_size:
+            break
+
+    if buffered_rows and (sample_size <= 0 or ingested < sample_size):
+        _upsert_items(db, buffered_rows)
         db.commit()
-        
-    print("✅ Items ingested into Postgres and Qdrant.")
-    
-    # 2. Simulate Users and Interactions
-    print("👤 Creating synthetic users and interactions...")
-    # Create 100 users
-    users = []
-    for i in range(100):
-        user = models.User(external_id=f"USER_{i}")
-        users.append(user)
-    db.add_all(users)
-    db.commit()
-    
-    # Get all items from DB to link them
-    db_items = db.query(models.Item).all()
-    item_ids = [it.id for it in db_items]
-    user_ids = [u.id for u in users]
-    
-    interactions = []
-    for _ in range(5000):
-        uid = np.random.choice(user_ids)
-        iid = np.random.choice(item_ids)
-        itype = np.random.choice(['view', 'click', 'purchase'], p=[0.7, 0.2, 0.1])
-        
-        interaction = models.Interaction(
-            user_id=uid,
-            item_id=iid,
-            interaction_type=itype,
-            timestamp=pd.Timestamp.now() - pd.Timedelta(days=np.random.randint(0, 30))
-        )
-        interactions.append(interaction)
-        
-        if len(interactions) >= 500:
-            db.add_all(interactions)
-            db.commit()
-            interactions = []
-            
-    if interactions:
-        db.add_all(interactions)
-        db.commit()
-        
-    print("✅ Users and Interactions ingested.")
+        texts = [f"{r['title']}. Category: {r['category']}" for r in buffered_rows]
+        vectors = model.encode(texts, batch_size=batch_size, show_progress_bar=False).tolist()
+        _upsert_qdrant(q_client, buffered_rows, vectors=vectors)
+        ingested += len(buffered_rows)
+
     db.close()
+    print(f"Done. Upserted {ingested} products into Postgres + Qdrant.")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Ingest product CSV into Postgres + Qdrant.")
+    parser.add_argument(
+        "--csv",
+        dest="csv_path",
+        default="/app/data/amz_uk_processed_data.csv",
+        help="Path to amz_uk_processed_data.csv",
+    )
+    parser.add_argument(
+        "--sample-size",
+        type=int,
+        default=settings.INGEST_SAMPLE_SIZE,
+        help="Number of products to ingest (0 = ingest all rows).",
+    )
+    parser.add_argument("--chunksize", type=int, default=2000)
+    parser.add_argument("--batch-size", type=int, default=settings.INGEST_BATCH_SIZE)
+    parser.add_argument(
+        "--reset",
+        action="store_true",
+        help="If set, recreates the Qdrant collection before ingesting.",
+    )
+    args = parser.parse_args()
+
+    ingest_data(
+        csv_path=args.csv_path,
+        sample_size=args.sample_size,
+        chunksize=args.chunksize,
+        batch_size=args.batch_size,
+        reset=args.reset,
+    )
+
 
 if __name__ == "__main__":
-    csv_path = "amz_uk_processed_data.csv"
-    ingest_data(csv_path)
+    main()
