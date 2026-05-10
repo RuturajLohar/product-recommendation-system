@@ -74,6 +74,9 @@ services:
       - INGEST_SAMPLE_SIZE=${INGEST_SAMPLE_SIZE:-25000}
       - INGEST_BATCH_SIZE=${INGEST_BATCH_SIZE:-128}
       - CACHE_TTL=${CACHE_TTL:-120}
+      - GROQ_API_KEY=${GROQ_API_KEY}
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - USE_LLM_RERANKING=${USE_LLM_RERANKING:-false}
     volumes:
       - ./data/amz_uk_processed_data.csv:/app/data/amz_uk_processed_data.csv:ro
     develop:

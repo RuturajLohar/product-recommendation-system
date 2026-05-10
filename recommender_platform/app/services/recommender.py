@@ -6,12 +6,15 @@ from sqlalchemy.orm import Session
 from ..db import models
 from ..ml.engine.hybrid import HybridEngine
 from ..ml.ranking.ranker import XGBRanker
+from ..services.llm import llm_service
+from ..core.config import settings
 
 class RecommenderService:
     def __init__(self, db: Session, engine: HybridEngine, ranker: XGBRanker):
         self.db = db
         self.engine = engine
         self.ranker = ranker
+        self.llm = llm_service
 
     def _normalize_candidate(self, cand: Dict[str, Any]) -> Dict[str, Any]:
         # Ensure all response fields exist for the frontend/schema.
@@ -67,12 +70,27 @@ class RecommenderService:
             )
 
         final = (diverse + cand_no_vec)[:limit]
+        
+        # Phase 5: LLM Reranking (Groq) & Explanation (Gemini)
+        if settings.USE_LLM_RERANKING and settings.GROQ_API_KEY:
+            user_pref = f"User has viewed: {', '.join(titles[:3])}"
+            final = await self.llm.rerank_with_groq(query=titles[0], candidates=final, user_context=user_pref)
+            final = final[:limit]
+
         final = [self._normalize_candidate(c) for c in final]
+
+        # Add Gemini Explanations for top 3
+        if settings.GEMINI_API_KEY:
+            for item in final[:3]:
+                item["explanation_text"] = await self.llm.explain_with_gemini(
+                    product_title=item["title"], 
+                    user_interest=titles[0]
+                )
         
         return {
             "user_id": user_id,
             "recommendations": final,
-            "strategy": "xgboost_ranked_hybrid"
+            "strategy": "llm_enhanced_hybrid" if settings.USE_LLM_RERANKING else "xgboost_ranked_hybrid"
         }
 
     async def get_similar_items(self, asin: str, limit: int) -> Dict:

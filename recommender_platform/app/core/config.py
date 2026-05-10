@@ -24,6 +24,11 @@ class Settings(BaseSettings):
     INGEST_BATCH_SIZE: int = 128
     CACHE_TTL: int = 120
 
+    # LLM Settings
+    GROQ_API_KEY: str | None = None
+    GEMINI_API_KEY: str | None = None
+    USE_LLM_RERANKING: bool = False
+
     @property
     def sqlalchemy_database_url(self) -> str:
         if self.DATABASE_URL:

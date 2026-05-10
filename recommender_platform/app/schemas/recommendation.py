@@ -17,6 +17,7 @@ class ItemDetail(BaseModel):
     img_url: Optional[str] = None
     score: Optional[float] = None
     explanation: Optional[Dict[str, float]] = None
+    explanation_text: Optional[str] = None
 
 class RecResponse(BaseModel):
     user_id: Optional[str] = None

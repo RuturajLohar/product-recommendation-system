@@ -15,3 +15,5 @@ tqdm
 scikit-learn
 gradio
 redis
+groq
+google-generativeai

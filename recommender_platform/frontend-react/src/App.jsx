@@ -347,9 +347,8 @@ const App = () => {
                     <div className="flex items-center text-indigo-300 text-sm font-semibold mb-2">
                       <Sparkles size={16} className="mr-2" /> AI Recommendation Insight
                     </div>
-                    <p className="text-indigo-200/70 text-xs leading-relaxed">
-                      We recommended this because of its high similarity to items you've viewed in {selectedProduct.category}. 
-                      The rating of {selectedProduct.stars} shows strong customer satisfaction in this category.
+                    <p className="text-indigo-200/70 text-xs leading-relaxed italic">
+                      {selectedProduct.explanation_text || `We recommended this because of its high similarity to items you've viewed in ${selectedProduct.category}. The rating of ${selectedProduct.stars} shows strong customer satisfaction.`}
                     </p>
                   </div>
 
