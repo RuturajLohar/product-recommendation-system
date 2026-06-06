@@ -1,12 +1,22 @@
 SHELL := /bin/sh
 
-.PHONY: up down watch ingest frontend logs
+.PHONY: up down down-v teardown watch ingest frontend logs
 
 up:
 	docker compose up -d --build db qdrant redis api
 
 down:
-	docker compose down
+	docker compose down --timeout 15
+
+down-v:
+	docker compose down --timeout 15 -v
+
+# Use when compose hangs: forces removal of named containers after compose down.
+teardown:
+	./scripts/docker-teardown.sh
+
+teardown-v:
+	./scripts/docker-teardown.sh --volumes
 
 watch:
 	docker compose up --build --watch

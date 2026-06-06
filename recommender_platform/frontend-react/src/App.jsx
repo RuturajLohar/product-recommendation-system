@@ -3,7 +3,11 @@ import axios from 'axios';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Search, ShoppingBag, User, Star, TrendingUp, Sparkles, ChevronRight, X } from 'lucide-react';
 
-const API_BASE = import.meta.env.VITE_API_BASE ?? 'http://127.0.0.1:8000/api/v1';
+// Dev: use same-origin `/api/v1` so Vite proxies to the backend (see vite.config.js).
+// Prod / custom: set VITE_API_BASE, e.g. https://api.example.com/api/v1
+const API_BASE =
+  (import.meta.env.VITE_API_BASE && String(import.meta.env.VITE_API_BASE).trim()) ||
+  (import.meta.env.DEV ? '/api/v1' : 'http://127.0.0.1:8000/api/v1');
 const FALLBACK_IMG = 'https://images.unsplash.com/photo-1523275335684-37898b6baf30?w=800&q=80';
 
 const ProductCard = ({ product, onClick }) => (
@@ -115,7 +119,9 @@ const App = () => {
       }
 
       if (pRecs.status === 'rejected' && tItems.status === 'rejected') {
-        setError('Could not reach the API. Make sure the backend is running on :8000 and try again.');
+        setError(
+          'Could not reach the API. Start the backend on port 8000 (e.g. from recommender_platform: docker compose up -d db qdrant redis api), then click Retry. In dev, requests go through the Vite proxy at /api → http://127.0.0.1:8000.'
+        );
       }
     } catch (error) {
       setError('Unexpected error while loading recommendations.');
