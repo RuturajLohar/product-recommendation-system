@@ -22,3 +22,10 @@ def get_json(key: str) -> Optional[Any]:
 def set_json(key: str, value: Any, ttl_seconds: int) -> None:
     redis_client().setex(key, ttl_seconds, json.dumps(value))
 
+
+def delete_pattern(pattern: str) -> int:
+    client = redis_client()
+    keys = list(client.scan_iter(match=pattern))
+    if not keys:
+        return 0
+    return int(client.delete(*keys))

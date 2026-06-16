@@ -25,6 +25,15 @@ class RecommenderService:
         out.setdefault("product_url", None)
         out.setdefault("img_url", None)
         return out
+
+    def _demo_explanation(self, item: Dict[str, Any], user_interest: str | None = None) -> str:
+        category = item.get("category") or "this category"
+        stars = item.get("stars") or 0
+        if user_interest:
+            return f"Recommended because it matches your recent interest and is strong in {category}."
+        if stars and float(stars) >= 4.5:
+            return f"Popular {category} pick with a strong {stars}-star rating."
+        return f"Recommended from similar products and trending signals in {category}."
         
     async def get_personalized_recs(self, user_id: str, limit: int) -> Dict:
         user = self.db.query(models.User).filter(models.User.external_id == user_id).first()
@@ -47,6 +56,8 @@ class RecommenderService:
         titles = [h.title for h in history if h.title]
         embedding = self.engine.get_user_embedding(titles)
         candidates = self.engine.search_candidates(embedding, limit=50)
+        history_asins = {h.asin for h in history if h.asin}
+        candidates = [c for c in candidates if c.get("asin") not in history_asins]
         
         # Ranking (heuristic fallback if model not trained)
         user_hist_dicts = [{"category": h.category or "Unknown"} for h in history]
@@ -86,6 +97,12 @@ class RecommenderService:
                     product_title=item["title"], 
                     user_interest=titles[0]
                 )
+        for item in final:
+            if not item.get("explanation_text") or item.get("explanation_text") in {
+                "Fits your interest in this category.",
+                "Recommended based on your recent activity.",
+            }:
+                item["explanation_text"] = self._demo_explanation(item, titles[0] if titles else None)
         
         return {
             "user_id": user_id,
@@ -99,8 +116,11 @@ class RecommenderService:
             return {"error": "Item not found"}
             
         embedding = self.engine.get_embedding(item.title)
-        candidates = self.engine.search_candidates(embedding, limit=limit)
+        candidates = self.engine.search_candidates(embedding, limit=limit + 10)
+        candidates = [c for c in candidates if c.get("asin") != asin][:limit]
         candidates = [self._normalize_candidate(c) for c in candidates]
+        for cand in candidates:
+            cand["explanation_text"] = self._demo_explanation(cand)
         
         return {
             "seed_item": {"asin": asin},
@@ -139,6 +159,9 @@ class RecommenderService:
                     "product_url": item.product_url,
                     "img_url": item.img_url,
                     "score": float(score) if score is not None else None,
+                    "explanation_text": self._demo_explanation(
+                        {"category": item.category, "stars": item.stars}
+                    ),
                 }
             )
         

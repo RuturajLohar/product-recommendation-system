@@ -28,6 +28,7 @@ class Settings(BaseSettings):
     GROQ_API_KEY: str | None = None
     GEMINI_API_KEY: str | None = None
     USE_LLM_RERANKING: bool = False
+    RANKER_MODEL_PATH: str | None = None
 
     @property
     def sqlalchemy_database_url(self) -> str:

@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import axios from 'axios';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Search, ShoppingBag, User, Star, TrendingUp, Sparkles, ChevronRight, X } from 'lucide-react';
+import { Search, ShoppingBag, User, Star, TrendingUp, Sparkles, ChevronRight, X, BarChart3, Database, MousePointerClick, Layers, Brain, Network } from 'lucide-react';
 
 // Dev: use same-origin `/api/v1` so Vite proxies to the backend (see vite.config.js).
 // Prod / custom: set VITE_API_BASE, e.g. https://api.example.com/api/v1
@@ -9,6 +9,23 @@ const API_BASE =
   (import.meta.env.VITE_API_BASE && String(import.meta.env.VITE_API_BASE).trim()) ||
   (import.meta.env.DEV ? '/api/v1' : 'http://127.0.0.1:8000/api/v1');
 const FALLBACK_IMG = 'https://images.unsplash.com/photo-1523275335684-37898b6baf30?w=800&q=80';
+
+const DEMO_USERS = [
+  { id: 'USER_0', label: 'Speaker Fan' },
+  { id: 'USER_1', label: 'Tech Buyer' },
+  { id: 'USER_2', label: 'Budget Shopper' },
+  { id: 'USER_3', label: 'Home Setup' },
+  { id: 'CODEx_SMOKE_USER', label: 'Live Demo User' },
+];
+
+const HOW_IT_WORKS = [
+  { icon: MousePointerClick, title: 'Track', text: 'Clicks and views are saved as user interactions.' },
+  { icon: Brain, title: 'Embed', text: 'Product titles are converted into SBERT vectors.' },
+  { icon: Network, title: 'Retrieve', text: 'Qdrant finds semantically similar products.' },
+  { icon: Layers, title: 'Rank', text: 'Ranking signals sort and diversify the final list.' },
+];
+
+const formatNumber = (value) => new Intl.NumberFormat('en-US').format(value || 0);
 
 const ProductCard = ({ product, onClick }) => (
   <motion.div
@@ -46,10 +63,25 @@ const ProductCard = ({ product, onClick }) => (
   </motion.div>
 );
 
+const StatCard = ({ icon: Icon, label, value, detail }) => (
+  <div className="glass rounded-2xl p-5">
+    <div className="flex items-center justify-between">
+      <div className="w-10 h-10 rounded-xl bg-indigo-500/10 border border-indigo-500/20 flex items-center justify-center">
+        <Icon size={18} className="text-indigo-300" />
+      </div>
+      <span className="text-[10px] uppercase tracking-widest text-slate-500">Live</span>
+    </div>
+    <div className="text-2xl font-bold text-white mt-5">{value}</div>
+    <div className="text-sm font-semibold text-slate-300 mt-1">{label}</div>
+    {detail && <div className="text-xs text-slate-500 mt-2 line-clamp-1">{detail}</div>}
+  </div>
+);
+
 const App = () => {
-  const [currentUser, setCurrentUser] = useState(() => localStorage.getItem('eliterec.user') || 'USER_0');
+  const [currentUser, setCurrentUser] = useState(() => localStorage.getItem('eliterec.user') || DEMO_USERS[0].id);
   const [personalizedRecs, setPersonalizedRecs] = useState([]);
   const [trendingItems, setTrendingItems] = useState([]);
+  const [analyticsSummary, setAnalyticsSummary] = useState(null);
   const [selectedProduct, setSelectedProduct] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -101,9 +133,10 @@ const App = () => {
     setLoading(true);
     setError(null);
     try {
-      const [pRecs, tItems] = await Promise.allSettled([
+      const [pRecs, tItems, stats] = await Promise.allSettled([
         axios.get(`${API_BASE}/recommend/user/${currentUser}?limit=5`),
-        axios.get(`${API_BASE}/recommend/trending?limit=8`)
+        axios.get(`${API_BASE}/recommend/trending?limit=8`),
+        axios.get(`${API_BASE}/analytics/summary`)
       ]);
 
       if (pRecs.status === 'fulfilled') {
@@ -116,6 +149,10 @@ const App = () => {
         setTrendingItems(tItems.value.data.recommendations || []);
       } else {
         setTrendingItems([]);
+      }
+
+      if (stats.status === 'fulfilled') {
+        setAnalyticsSummary(stats.value.data);
       }
 
       if (pRecs.status === 'rejected' && tItems.status === 'rejected') {
@@ -150,6 +187,33 @@ const App = () => {
     }, 250);
     return () => clearTimeout(t);
   }, [searchQuery]);
+
+  const metricCards = useMemo(() => ([
+    {
+      icon: Database,
+      label: 'Products indexed',
+      value: formatNumber(analyticsSummary?.total_products),
+      detail: analyticsSummary?.top_category?.name ? `Top category: ${analyticsSummary.top_category.name}` : 'Catalog ready',
+    },
+    {
+      icon: User,
+      label: 'Demo users',
+      value: formatNumber(analyticsSummary?.total_users),
+      detail: 'Switch users to see personalization change',
+    },
+    {
+      icon: MousePointerClick,
+      label: 'Interactions tracked',
+      value: formatNumber(analyticsSummary?.total_interactions),
+      detail: analyticsSummary?.most_interacted_product?.title || 'Click products to create signals',
+    },
+    {
+      icon: BarChart3,
+      label: 'Recommendation engine',
+      value: 'Hybrid',
+      detail: analyticsSummary?.active_strategy || 'SBERT + Qdrant + ranking',
+    },
+  ]), [analyticsSummary]);
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-200">
@@ -223,8 +287,8 @@ const App = () => {
               value={currentUser}
               onChange={(e) => setCurrentUser(e.target.value)}
             >
-              {[...Array(10)].map((_, i) => (
-                <option key={i} value={`USER_${i}`} className="bg-slate-900">User #{i}</option>
+              {DEMO_USERS.map((user) => (
+                <option key={user.id} value={user.id} className="bg-slate-900">{user.label}</option>
               ))}
             </select>
           </div>
@@ -244,6 +308,24 @@ const App = () => {
             </button>
           </div>
         )}
+
+        <section>
+          <div className="flex items-end justify-between mb-6">
+            <div>
+              <p className="text-xs uppercase tracking-[0.3em] text-indigo-300 font-bold">Project Dashboard</p>
+              <h1 className="text-4xl font-bold text-white tracking-tight mt-2">Hybrid Recommendation Demo</h1>
+              <p className="text-slate-400 mt-2 max-w-2xl">
+                A compact college-project demo showing catalog search, event tracking, vector retrieval, ranking, and personalized recommendations in one flow.
+              </p>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+            {metricCards.map((card) => (
+              <StatCard key={card.label} {...card} />
+            ))}
+          </div>
+        </section>
 
         {/* Hero / Personalized */}
         <section ref={personalizedRef}>
@@ -279,6 +361,30 @@ const App = () => {
                 </div>
               )
             )}
+          </div>
+        </section>
+
+        <section>
+          <div className="flex items-center justify-between mb-8">
+            <div>
+              <h2 className="text-2xl font-bold text-white tracking-tight">How It Works</h2>
+              <p className="text-slate-400 mt-1">The full recommendation pipeline, simplified for presentation.</p>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+            {HOW_IT_WORKS.map(({ icon: Icon, title, text }, index) => (
+              <div key={title} className="glass rounded-2xl p-5">
+                <div className="flex items-center justify-between mb-5">
+                  <div className="w-10 h-10 rounded-xl bg-white/5 border border-white/10 flex items-center justify-center">
+                    <Icon size={18} className="text-indigo-300" />
+                  </div>
+                  <span className="text-xs text-slate-500 font-bold">0{index + 1}</span>
+                </div>
+                <div className="text-white font-bold">{title}</div>
+                <p className="text-sm text-slate-400 mt-2">{text}</p>
+              </div>
+            ))}
           </div>
         </section>
 
@@ -358,7 +464,14 @@ const App = () => {
                     </p>
                   </div>
 
-                  <button className="w-full bg-indigo-600 hover:bg-indigo-500 text-white font-bold py-4 rounded-xl transition-all shadow-lg shadow-indigo-600/20">
+                  <button
+                    onClick={async () => {
+                      if (!selectedProduct?.asin) return;
+                      await trackEvent({ type: 'purchase', asin: selectedProduct.asin });
+                      fetchData();
+                    }}
+                    className="w-full bg-indigo-600 hover:bg-indigo-500 text-white font-bold py-4 rounded-xl transition-all shadow-lg shadow-indigo-600/20"
+                  >
                     Add to Cart
                   </button>
                 </div>

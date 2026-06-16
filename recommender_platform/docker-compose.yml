@@ -3,9 +3,6 @@ services:
     image: postgres:15-alpine
     container_name: rec_postgres
     restart: unless-stopped
-    env_file:
-      - path: .env
-        required: false
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-admin}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-secretpassword}
@@ -24,9 +21,6 @@ services:
     image: qdrant/qdrant:latest
     container_name: rec_qdrant
     restart: unless-stopped
-    env_file:
-      - path: .env
-        required: false
     ports:
       - "${QDRANT_PORT:-6333}:6333"
       - "6334:6334"
@@ -37,9 +31,6 @@ services:
     image: redis:7-alpine
     container_name: rec_redis
     restart: unless-stopped
-    env_file:
-      - path: .env
-        required: false
     ports:
       - "${REDIS_PORT:-6379}:6379"
 
@@ -56,9 +47,6 @@ services:
     ports:
       - "${API_PORT:-8000}:8000"
     restart: unless-stopped
-    env_file:
-      - path: .env
-        required: false
     environment:
       - DATABASE_URL=${DATABASE_URL:-postgresql://admin:secretpassword@db:5432/recommender_db}
       - POSTGRES_USER=${POSTGRES_USER:-admin}
@@ -74,6 +62,7 @@ services:
       - INGEST_SAMPLE_SIZE=${INGEST_SAMPLE_SIZE:-25000}
       - INGEST_BATCH_SIZE=${INGEST_BATCH_SIZE:-128}
       - CACHE_TTL=${CACHE_TTL:-120}
+      - RANKER_MODEL_PATH=${RANKER_MODEL_PATH:-}
       - GROQ_API_KEY=${GROQ_API_KEY}
       - GEMINI_API_KEY=${GEMINI_API_KEY}
       - USE_LLM_RERANKING=${USE_LLM_RERANKING:-false}
@@ -103,11 +92,9 @@ services:
     container_name: rec_frontend
     restart: unless-stopped
     working_dir: /app
-    env_file:
-      - path: .env
-        required: false
     environment:
       - VITE_API_BASE=${VITE_API_BASE:-http://127.0.0.1:8000/api/v1}
+      - VITE_PROXY_API=${VITE_PROXY_API:-http://api:8000}
     command: sh -c "npm install && npm run dev -- --host 0.0.0.0 --port ${FRONTEND_PORT:-5173}"
     ports:
       - "${FRONTEND_PORT:-5173}:5173"

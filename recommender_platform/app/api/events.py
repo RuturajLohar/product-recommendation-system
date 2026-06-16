@@ -1,15 +1,18 @@
 from datetime import datetime
+import logging
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
+from ..core.cache import delete_pattern
 from ..db import models
 from ..db.session import get_db
 
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 class EventIn(BaseModel):
@@ -39,6 +42,9 @@ def create_event(payload: EventIn, db: Session = Depends(get_db)):
     )
     db.add(interaction)
     db.commit()
+    try:
+        delete_pattern(f"recs:user:{payload.user_id}:limit:*")
+    except Exception as exc:
+        logger.warning("Failed to invalidate recommendation cache for %s: %s", payload.user_id, exc)
 
     return None
-
