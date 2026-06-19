@@ -16,11 +16,18 @@ class HybridEngine:
         return self.sbert.encode(text).tolist()
 
     def get_user_embedding(self, titles: List[str]) -> List[float]:
+        """Recency-weighted user profile embedding.
+        Most recent title (index 0) gets highest weight via exponential decay.
+        This prevents a single outlier interaction from dominating the profile."""
         if not titles:
             return self.get_embedding("")
         vecs = np.asarray(self.sbert.encode(titles))
-        mean_vec = vecs.mean(axis=0)
-        return mean_vec.astype(np.float32).tolist()
+        n = len(titles)
+        decay_rate = 0.8  # each older title gets 80% of previous weight
+        weights = np.array([decay_rate ** i for i in range(n)], dtype=np.float32)
+        weights /= weights.sum()
+        weighted_vec = (vecs.T @ weights).astype(np.float32)
+        return weighted_vec.tolist()
 
     def search_candidates(self, vector: List[float], limit: int = 100) -> List[Dict]:
         """Fetch candidates from Qdrant"""

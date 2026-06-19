@@ -57,14 +57,16 @@ class HybridConfig:
         "recency": 0.10,      # How recently user interacted with similar items
     }
 
-    # Content sub-weights (used inside content scoring, same as original)
+    # Content sub-weights (aligned with improved app.py ensemble)
     CONTENT_WEIGHTS = {
-        "content_sbert": 0.45,
-        "content_tfidf": 0.20,
-        "category": 0.20,
+        "content_sbert": 0.35,
+        "content_tfidf": 0.15,
+        "category": 0.15,
         "popularity": 0.05,
         "price": 0.05,
-        "rating": 0.05,
+        "rating": 0.10,
+        "review_count": 0.05,
+        "best_seller": 0.05,
     }
 
 
@@ -113,7 +115,9 @@ class HybridRecommender:
     def _compute_content_scores(
         self, q_idx: int, cand_indices: List[int]
     ) -> np.ndarray:
-        """Compute the content-based ensemble score for candidates."""
+        """Compute the content-based ensemble score for candidates.
+        Uses all improved signals: soft category similarity, Bayesian rating,
+        review confidence, best_seller, and symmetric price similarity."""
         q_row = self.df.iloc[q_idx]
         q_title = str(q_row["title"])
         q_emb = self.embeddings[q_idx : q_idx + 1]
@@ -127,7 +131,7 @@ class HybridRecommender:
             q_title, cand_indices
         )
 
-        # Metadata
+        # Price (symmetric log-ratio)
         price_sims = np.array(
             [
                 self.content_recommender._price_similarity(
@@ -137,22 +141,38 @@ class HybridRecommender:
             ],
             dtype=np.float32,
         )
-        rating_sims = np.array(
+
+        # Bayesian rating (discounts high stars with low reviews)
+        bayesian_ratings = np.array(
             [
-                self.content_recommender._rating_similarity(
-                    q_row["stars"], self.df.iloc[i]["stars"]
+                float(self.df.iloc[i].get("rating_bayesian",
+                      self.df.iloc[i].get("rating_normalized", 0.5)))
+                for i in cand_indices
+            ],
+            dtype=np.float32,
+        )
+
+        # Soft category similarity (embedding-based)
+        q_cat = str(q_row["categoryName"])
+        cat_sims = np.array(
+            [
+                self.content_recommender._category_similarity(
+                    q_cat, str(self.df.iloc[i]["categoryName"])
                 )
                 for i in cand_indices
             ],
             dtype=np.float32,
         )
-        cat_match = np.array(
-            [
-                1.0
-                if str(q_row["categoryName"]) == str(self.df.iloc[i]["categoryName"])
-                else 0.0
-                for i in cand_indices
-            ],
+
+        # Review confidence
+        review_conf = np.array(
+            [float(self.df.iloc[i].get("review_confidence", 0.5)) for i in cand_indices],
+            dtype=np.float32,
+        )
+
+        # Best seller
+        best_seller = np.array(
+            [float(self.df.iloc[i].get("best_seller", 0.0)) for i in cand_indices],
             dtype=np.float32,
         )
 
@@ -160,15 +180,19 @@ class HybridRecommender:
         sbert_norm = self._normalize_scores(sbert_sims)
         tfidf_norm = self._normalize_scores(tfidf_sims)
         price_norm = self._normalize_scores(price_sims)
-        rating_norm = self._normalize_scores(rating_sims)
+        rating_norm = self._normalize_scores(bayesian_ratings)
+        cat_norm = self._normalize_scores(cat_sims)
+        review_norm = self._normalize_scores(review_conf)
 
         w = self.content_weights
         content_score = (
             w["content_sbert"] * sbert_norm
             + w["content_tfidf"] * tfidf_norm
-            + w["category"] * cat_match
+            + w["category"] * cat_norm
             + w["price"] * price_norm
             + w["rating"] * rating_norm
+            + w.get("review_count", 0.05) * review_norm
+            + w.get("best_seller", 0.05) * best_seller
         )
 
         return content_score
@@ -191,6 +215,7 @@ class HybridRecommender:
 
         Items similar to what the user interacted with recently get a boost.
         Uses exponential decay: score = exp(-days_since_interaction / 30).
+        Optimized: pre-builds category-to-latest-timestamp map.
         """
         if self.interactions_df is None:
             return np.ones(len(cand_indices), dtype=np.float32) * 0.5
@@ -202,28 +227,26 @@ class HybridRecommender:
         if user_history.empty:
             return np.ones(len(cand_indices), dtype=np.float32) * 0.5
 
-        # Get the categories user interacted with recently
         user_history["timestamp"] = pd.to_datetime(user_history["timestamp"])
         max_ts = user_history["timestamp"].max()
 
-        # For each candidate, check if user interacted with same category recently
-        recency_scores = np.zeros(len(cand_indices), dtype=np.float32)
+        # Pre-build category -> latest interaction timestamp map (O(n) instead of O(n*m))
+        cat_latest: Dict[str, pd.Timestamp] = {}
+        for _, row in user_history.iterrows():
+            item_idx = int(row["item_idx"])
+            if item_idx >= len(self.df):
+                continue
+            cat = self.df.iloc[item_idx]["categoryName"]
+            ts = row["timestamp"]
+            if cat not in cat_latest or ts > cat_latest[cat]:
+                cat_latest[cat] = ts
 
+        # Score each candidate in O(1) per candidate
+        recency_scores = np.zeros(len(cand_indices), dtype=np.float32)
         for i, cand_idx in enumerate(cand_indices):
             cand_cat = self.df.iloc[cand_idx]["categoryName"]
-
-            # Find user's most recent interaction in this category
-            cat_history = user_history[
-                user_history["item_idx"].apply(
-                    lambda x: self.df.iloc[x]["categoryName"] == cand_cat
-                    if x < len(self.df)
-                    else False
-                )
-            ]
-
-            if not cat_history.empty:
-                latest = cat_history["timestamp"].max()
-                days_ago = (max_ts - latest).total_seconds() / 86400
+            if cand_cat in cat_latest:
+                days_ago = (max_ts - cat_latest[cand_cat]).total_seconds() / 86400
                 recency_scores[i] = float(np.exp(-days_ago / 30.0))
 
         return recency_scores

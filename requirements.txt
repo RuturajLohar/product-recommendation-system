@@ -7,4 +7,3 @@ pandas
 torch
 scikit-learn
 tqdm
-lightfm

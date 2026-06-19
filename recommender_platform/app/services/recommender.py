@@ -24,7 +24,40 @@ class RecommenderService:
         out.setdefault("is_best_seller", False)
         out.setdefault("product_url", None)
         out.setdefault("img_url", None)
+        out.setdefault("product_id", out.get("asin"))
+        out.setdefault("brand", None)
+        out.setdefault("subcategory", None)
+        out.setdefault("description", None)
+        out.setdefault("features", [])
+        out.setdefault("specifications", {})
+        out.setdefault("keywords_tags", "")
+        out.setdefault("rating", out.get("stars", 0))
+        out.setdefault("review_count", out.get("reviews", 0))
+        out.setdefault("popularity", 0.0)
+        out.setdefault("best_seller", out.get("is_best_seller", False))
+        out.setdefault("availability", "in_stock")
+        out.setdefault("image_url", out.get("img_url"))
         return out
+
+    @staticmethod
+    def _item_content(item: models.Item) -> str:
+        features = " ".join(item.features or [])
+        specifications = " ".join(
+            f"{key} {value}" for key, value in (item.specifications or {}).items()
+        )
+        return " | ".join(
+            value
+            for value in (
+                item.title,
+                item.brand,
+                item.category,
+                item.subcategory,
+                features,
+                specifications,
+                item.keywords_tags,
+            )
+            if value
+        )
 
     def _demo_explanation(self, item: Dict[str, Any], user_interest: str | None = None) -> str:
         category = item.get("category") or "this category"
@@ -115,7 +148,7 @@ class RecommenderService:
         if not item:
             return {"error": "Item not found"}
             
-        embedding = self.engine.get_embedding(item.title)
+        embedding = self.engine.get_embedding(self._item_content(item))
         candidates = self.engine.search_candidates(embedding, limit=limit + 10)
         candidates = [c for c in candidates if c.get("asin") != asin][:limit]
         candidates = [self._normalize_candidate(c) for c in candidates]

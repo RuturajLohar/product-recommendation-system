@@ -28,13 +28,18 @@ class Config:
 
     # default ensemble weights (you can tune these)
     ENSEMBLE_WEIGHTS = {
-        "content_sbert": 0.45,
-        "content_tfidf": 0.20,
-        "category": 0.20,
+        "content_sbert": 0.35,
+        "content_tfidf": 0.15,
+        "category": 0.15,
         "popularity": 0.05,
         "price": 0.05,
-        "rating": 0.05
+        "rating": 0.10,
+        "review_count": 0.05,
+        "best_seller": 0.05,
     }
+
+    # Bayesian rating damping factor — require this many reviews for full confidence
+    RATING_DAMPING = 50
 
 config = Config()
 
@@ -66,13 +71,44 @@ class DataProcessor:
         df['stars'] = df['stars'].fillna(median_stars)
         df['rating_normalized'] = (df['stars'] / 5.0).clip(0.0, 1.0)
 
-        # popularity
+        # reviews — for Bayesian rating and review confidence
+        df['reviews'] = pd.to_numeric(df.get('reviews', 0), errors='coerce').fillna(0).astype(int)
+
+        # Bayesian damped rating: (R*v + C*m) / (v + m)
+        # Discounts high ratings with few reviews
+        global_mean = df['stars'].mean()
+        m = config.RATING_DAMPING
+        df['rating_bayesian'] = (
+            (df['stars'] * df['reviews'].clip(lower=0) + global_mean * m) /
+            (df['reviews'].clip(lower=0) + m)
+        ) / 5.0
+        df['rating_bayesian'] = df['rating_bayesian'].clip(0.0, 1.0)
+
+        # Review confidence — log-scaled review count (tames outliers)
+        raw_reviews = df['reviews'].clip(lower=0).astype(float)
+        df['review_confidence'] = np.log1p(raw_reviews)
+        max_rc = df['review_confidence'].max()
+        if max_rc > 0:
+            df['review_confidence'] = df['review_confidence'] / max_rc
+        else:
+            df['review_confidence'] = 0.5
+
+        # Best seller flag
+        if 'isBestSeller' in df.columns:
+            df['best_seller'] = df['isBestSeller'].apply(
+                lambda x: 1.0 if str(x).strip().lower() in ('true', '1', 'yes') else 0.0
+            )
+        else:
+            df['best_seller'] = 0.0
+
+        # Popularity — log-scaled before normalizing (tames viral outliers)
         if 'boughtInLastMonth' in df.columns:
-            pop_vals = pd.to_numeric(df['boughtInLastMonth'].fillna(0), errors='coerce').values.reshape(-1, 1)
-            try:
-                scaler = MinMaxScaler()
-                df['popularity_score'] = scaler.fit_transform(pop_vals).flatten()
-            except Exception:
+            raw_pop = pd.to_numeric(df['boughtInLastMonth'].fillna(0), errors='coerce')
+            df['popularity_score'] = np.log1p(raw_pop.clip(lower=0))
+            max_pop = df['popularity_score'].max()
+            if max_pop > 0:
+                df['popularity_score'] = df['popularity_score'] / max_pop
+            else:
                 df['popularity_score'] = 0.5
         else:
             df['popularity_score'] = 0.5
@@ -122,6 +158,23 @@ class EmbeddingSystem:
         self.tfidf_vectorizer: Optional[TfidfVectorizer] = None
         self.tfidf_matrix = None
 
+    @staticmethod
+    def _build_rich_text(row) -> str:
+        """Build enriched text for embedding: title + category + price tier + rating.
+        This lets FAISS retrieval capture category and price-tier semantics at the vector level."""
+        parts = [str(row.get('title', ''))]
+        cat = row.get('categoryName', '')
+        if cat and str(cat) != 'Unknown':
+            parts.append(f"category: {cat}")
+        price = float(row.get('price', 0))
+        if price > 0:
+            tier = "budget" if price < 25 else "mid-range" if price < 100 else "premium" if price < 300 else "luxury"
+            parts.append(f"price: {tier}")
+        stars = float(row.get('stars', 0))
+        if stars > 0:
+            parts.append(f"rating: {stars:.1f} stars")
+        return ". ".join(parts)
+
     def create_embeddings(self, df: pd.DataFrame, cache_path: Optional[str] = None) -> np.ndarray:
         if cache_path and os.path.exists(cache_path):
             try:
@@ -134,8 +187,8 @@ class EmbeddingSystem:
             except Exception:
                 print("⚠️ Failed to load cache, will re-create embeddings.")
 
-        print("🔤 Creating SBERT embeddings...")
-        texts = df['title'].fillna('').astype(str).tolist()
+        print("🔤 Creating enriched SBERT embeddings (title + category + price tier + rating)...")
+        texts = df.apply(self._build_rich_text, axis=1).tolist()
         embeddings = self.model.encode(
             texts,
             batch_size=config.BATCH_SIZE,
@@ -192,15 +245,39 @@ class AdvancedRecommender:
         self.emb_system = emb_system
         self.recommendation_cache: Dict[str, Any] = {}
 
+        # Pre-compute category embeddings for soft category similarity
+        categories = self.df['categoryName'].unique().tolist()
+        print(f"🏷️  Computing category embeddings for {len(categories)} categories...")
+        cat_embs = emb_system.model.encode(categories, convert_to_numpy=True)
+        cat_embs = cat_embs.astype(np.float32)
+        # Normalize for cosine similarity via dot product
+        norms = np.linalg.norm(cat_embs, axis=1, keepdims=True) + 1e-9
+        cat_embs = cat_embs / norms
+        self.category_embedding_map: Dict[str, np.ndarray] = dict(zip(categories, cat_embs))
+
     @staticmethod
     def _price_similarity(a_price, b_price):
-        a = float(a_price) if not np.isnan(a_price) else 0.0
-        b = float(b_price) if not np.isnan(b_price) else 0.0
-        return 1.0 / (1.0 + abs(a - b) / (abs(a) + 1e-6))
+        """Symmetric log-ratio price similarity. Returns 1.0 when equal, decays smoothly.
+        Fixes the old asymmetric formula where price_sim(5,100) != price_sim(100,5)."""
+        a = max(float(a_price) if not np.isnan(a_price) else 0.01, 0.01)
+        b = max(float(b_price) if not np.isnan(b_price) else 0.01, 0.01)
+        log_ratio = abs(np.log(a) - np.log(b))
+        return float(np.exp(-log_ratio))
 
     @staticmethod
     def _rating_similarity(a_star, b_star):
         return 1.0 - min(1.0, abs(float(a_star) - float(b_star)) / 5.0)
+
+    def _category_similarity(self, cat_a: str, cat_b: str) -> float:
+        """Soft category similarity via SBERT embedding cosine distance.
+        'Hi-Fi Speakers' vs 'Headphones' now scores ~0.7 instead of 0.0."""
+        if str(cat_a) == str(cat_b):
+            return 1.0
+        emb_a = self.category_embedding_map.get(str(cat_a))
+        emb_b = self.category_embedding_map.get(str(cat_b))
+        if emb_a is None or emb_b is None:
+            return 0.0
+        return float(np.dot(emb_a, emb_b))
 
     @staticmethod
     def _normalize_scores(scores: np.ndarray):
@@ -221,29 +298,35 @@ class AdvancedRecommender:
         return np.array(sims, dtype=np.float32)
 
     def _mmr(self, candidate_ids: List[int], relevance_scores: np.ndarray, similarity_matrix: np.ndarray, top_k: int = 10, lamb: float = 0.65):
-        selected = []
+        """MMR diversity reranking. Fixed O(n²) bug with candidate_ids.index()."""
         if len(candidate_ids) == 0:
-            return selected
+            return []
 
-        relevance = relevance_scores.copy()
-        idx0 = int(np.argmax(relevance))
-        selected.append(candidate_ids[idx0])
+        n = len(candidate_ids)
+        selected_positions = []  # positions in the candidate list
+        remaining = set(range(n))
 
-        while len(selected) < min(top_k, len(candidate_ids)):
-            remaining_idx_positions = [i for i, cid in enumerate(candidate_ids) if cid not in selected]
-            if not remaining_idx_positions:
+        # Start with highest-relevance candidate
+        idx0 = int(np.argmax(relevance_scores))
+        selected_positions.append(idx0)
+        remaining.discard(idx0)
+
+        while len(selected_positions) < min(top_k, n) and remaining:
+            best_score = -float('inf')
+            best_pos = -1
+            for r in remaining:
+                # Max similarity to already-selected items
+                sim_to_selected = max(similarity_matrix[r, s] for s in selected_positions)
+                mmr_score = lamb * relevance_scores[r] - (1 - lamb) * sim_to_selected
+                if mmr_score > best_score:
+                    best_score = mmr_score
+                    best_pos = r
+            if best_pos == -1:
                 break
-            mmr_scores = []
-            for r in remaining_idx_positions:
-                sim_to_selected = 0.0
-                selected_positions = [candidate_ids.index(s) for s in selected]
-                if selected_positions:
-                    sim_to_selected = max([similarity_matrix[r, sp] for sp in selected_positions])
-                mmr_score = lamb * relevance[r] - (1 - lamb) * sim_to_selected
-                mmr_scores.append((r, mmr_score))
-            best = max(mmr_scores, key=lambda x: x[1])[0]
-            selected.append(candidate_ids[best])
-        return selected
+            selected_positions.append(best_pos)
+            remaining.discard(best_pos)
+
+        return [candidate_ids[p] for p in selected_positions]
 
     def recommend(self, asin_input: str, weights: Optional[Dict[str, float]] = None, max_results: int = 10, mmr_lambda: float = 0.65):
         if weights is None:
@@ -275,28 +358,45 @@ class AdvancedRecommender:
         # 3) TF-IDF lexical similarity
         tfidf_sims = self._compute_tfidf_similarity(q_title, cand_indices)
 
-        # 4) metadata similarities
+        # 4) metadata similarities — all improved
         price_sims = np.array([self._price_similarity(q_row['price'], self.df.iloc[i]['price']) for i in cand_indices], dtype=np.float32)
         rating_sims = np.array([self._rating_similarity(q_row['stars'], self.df.iloc[i]['stars']) for i in cand_indices], dtype=np.float32)
-        category_matches = np.array([1.0 if str(q_row['categoryName']) == str(self.df.iloc[i]['categoryName']) else 0.0 for i in cand_indices], dtype=np.float32)
+
+        # Soft category similarity (embedding-based, not binary)
+        q_cat = str(q_row['categoryName'])
+        category_sims = np.array([self._category_similarity(q_cat, str(self.df.iloc[i]['categoryName'])) for i in cand_indices], dtype=np.float32)
+
         popularity_vals = np.array([float(self.df.iloc[i].get('popularity_score', 0.5)) for i in cand_indices], dtype=np.float32)
+
+        # Bayesian rating for candidates (discounts high stars with low review count)
+        bayesian_ratings = np.array([float(self.df.iloc[i].get('rating_bayesian', self.df.iloc[i].get('rating_normalized', 0.5))) for i in cand_indices], dtype=np.float32)
+
+        # Review confidence (log-scaled review count)
+        review_conf = np.array([float(self.df.iloc[i].get('review_confidence', 0.5)) for i in cand_indices], dtype=np.float32)
+
+        # Best seller flag
+        best_seller = np.array([float(self.df.iloc[i].get('best_seller', 0.0)) for i in cand_indices], dtype=np.float32)
 
         # 5) normalize
         sbert_norm = self._normalize_scores(sbert_sims)
         tfidf_norm = self._normalize_scores(tfidf_sims)
         price_norm = self._normalize_scores(price_sims)
-        rating_norm = self._normalize_scores(rating_sims)
+        rating_norm = self._normalize_scores(bayesian_ratings)
         pop_norm = self._normalize_scores(popularity_vals)
-        category_norm = category_matches  # already 0/1
+        category_norm = self._normalize_scores(category_sims)
+        review_norm = self._normalize_scores(review_conf)
+        # best_seller is already 0/1, no normalization needed
 
-        # 6) ensemble score
+        # 6) ensemble score — now includes all signals
         ensemble_scores = (
-            weights.get('content_sbert', 0.45) * sbert_norm +
-            weights.get('content_tfidf', 0.20) * tfidf_norm +
-            weights.get('category', 0.20) * category_norm +
+            weights.get('content_sbert', 0.35) * sbert_norm +
+            weights.get('content_tfidf', 0.15) * tfidf_norm +
+            weights.get('category', 0.15) * category_norm +
             weights.get('popularity', 0.05) * pop_norm +
             weights.get('price', 0.05) * price_norm +
-            weights.get('rating', 0.05) * rating_norm
+            weights.get('rating', 0.10) * rating_norm +
+            weights.get('review_count', 0.05) * review_norm +
+            weights.get('best_seller', 0.05) * best_seller
         )
         if np.allclose(ensemble_scores, 0.0):
             ensemble_scores = sbert_norm
@@ -310,9 +410,12 @@ class AdvancedRecommender:
         # 8) apply MMR to select top-k
         selected_ids = self._mmr(cand_indices, ensemble_scores, cand_sim_matrix, top_k=max_results, lamb=mmr_lambda)
 
+        # Build index lookup for O(1) position finding
+        cand_idx_to_pos = {idx: pos for pos, idx in enumerate(cand_indices)}
+
         recs = []
         for idx in selected_ids:
-            pos = cand_indices.index(idx)
+            pos = cand_idx_to_pos[idx]
             p = self.df.iloc[idx]
             explanation = {
                 'sbert': float(sbert_norm[pos]),
@@ -321,6 +424,8 @@ class AdvancedRecommender:
                 'priceSim': float(price_norm[pos]),
                 'ratingSim': float(rating_norm[pos]),
                 'popularity': float(pop_norm[pos]),
+                'reviewConf': float(review_norm[pos]),
+                'bestSeller': float(best_seller[pos]),
                 'ensemble_score': float(ensemble_scores[pos])
             }
             recs.append({
@@ -367,10 +472,12 @@ class GradioInterface:
             with gr.Accordion("🎚️ Strategy Weights", open=False):
                 content_sbert_w = gr.Slider(0, 1, value=config.ENSEMBLE_WEIGHTS['content_sbert'], label="SBERT content weight")
                 content_tfidf_w = gr.Slider(0, 1, value=config.ENSEMBLE_WEIGHTS['content_tfidf'], label="TF-IDF lexical weight")
-                category_w = gr.Slider(0, 1, value=config.ENSEMBLE_WEIGHTS['category'], label="Category weight")
+                category_w = gr.Slider(0, 1, value=config.ENSEMBLE_WEIGHTS['category'], label="Category similarity weight")
                 pop_w = gr.Slider(0, 1, value=config.ENSEMBLE_WEIGHTS['popularity'], label="Popularity weight")
                 price_w = gr.Slider(0, 1, value=config.ENSEMBLE_WEIGHTS['price'], label="Price similarity weight")
-                rating_w = gr.Slider(0, 1, value=config.ENSEMBLE_WEIGHTS['rating'], label="Rating similarity weight")
+                rating_w = gr.Slider(0, 1, value=config.ENSEMBLE_WEIGHTS['rating'], label="Bayesian rating weight")
+                review_w = gr.Slider(0, 1, value=config.ENSEMBLE_WEIGHTS['review_count'], label="Review confidence weight")
+                bestseller_w = gr.Slider(0, 1, value=config.ENSEMBLE_WEIGHTS['best_seller'], label="Best seller weight")
 
             max_results = gr.Slider(1, 20, value=8, step=1, label="Number of Recommendations")
             mmr_lambda = gr.Slider(0.0, 1.0, value=0.65, step=0.05, label="MMR λ (higher -> more relevance, lower -> more diversity)")
@@ -383,16 +490,18 @@ class GradioInterface:
             diversity_score = gr.Number(label="Diversity Score")
             strategy_info = gr.JSON(label="Weights Used")
 
-            def get_recommendations(asin_input, sbert_w, tfidf_w, cat_w, pop_w, pr_w, rt_w, maxres, mmr_lam):
+            def get_recommendations(asin_input, sbert_w, tfidf_w, cat_w, pop_w, pr_w, rt_w, rev_w, bs_w, maxres, mmr_lam):
                 weights = {
                     'content_sbert': float(sbert_w),
                     'content_tfidf': float(tfidf_w),
                     'category': float(cat_w),
                     'popularity': float(pop_w),
                     'price': float(pr_w),
-                    'rating': float(rt_w)
+                    'rating': float(rt_w),
+                    'review_count': float(rev_w),
+                    'best_seller': float(bs_w),
                 }
-                # Normalize weights to sum to 1 for stability (optional)
+                # Normalize weights to sum to 1 for stability
                 total = sum(weights.values())
                 if total > 0:
                     weights = {k: v / total for k, v in weights.items()}
@@ -436,7 +545,7 @@ class GradioInterface:
 
             recommend_btn.click(
                 fn=get_recommendations,
-                inputs=[asin_input, content_sbert_w, content_tfidf_w, category_w, pop_w, price_w, rating_w, max_results, mmr_lambda],
+                inputs=[asin_input, content_sbert_w, content_tfidf_w, category_w, pop_w, price_w, rating_w, review_w, bestseller_w, max_results, mmr_lambda],
                 outputs=[product_info, gallery, diversity_score, strategy_info]
             )
 
