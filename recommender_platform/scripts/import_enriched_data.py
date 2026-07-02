@@ -172,9 +172,10 @@ def _write_batch(
 
 def _create_view_and_constraints(db: Session) -> None:
     required_columns = [
-        "product_id", "brand", "subcategory", "description", "features",
-        "specifications", "keywords_tags", "rating", "review_count", "popularity",
-        "best_seller", "availability", "image_url",
+        "product_id", "title", "brand", "category", "subcategory", "description",
+        "features", "specifications", "keywords_tags", "price", "rating",
+        "review_count", "popularity", "best_seller", "availability", "image_url",
+        "product_url",
     ]
     for column in required_columns:
         db.execute(text(f"ALTER TABLE items ALTER COLUMN {column} SET NOT NULL"))

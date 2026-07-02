@@ -41,21 +41,9 @@ class RecommenderService:
 
     @staticmethod
     def _item_content(item: models.Item) -> str:
-        features = " ".join(item.features or [])
-        specifications = " ".join(
-            f"{key} {value}" for key, value in (item.specifications or {}).items()
-        )
         return " | ".join(
             value
-            for value in (
-                item.title,
-                item.brand,
-                item.category,
-                item.subcategory,
-                features,
-                specifications,
-                item.keywords_tags,
-            )
+            for value in (item.title, item.category, item.description)
             if value
         )
 
