@@ -121,7 +121,7 @@ const App = () => {
       setError(
         status
           ? `The recommendation API returned an error (${status}).`
-          : 'Could not reach the recommendation API. Make sure the Docker stack is running.'
+          : 'Could not reach the recommendation API. Make sure the backend is running.'
       );
     } finally {
       setLoading(false);

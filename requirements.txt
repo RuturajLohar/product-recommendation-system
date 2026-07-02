@@ -1,9 +1,2 @@
-faiss-cpu
-sentence-transformers
-gradio
-plotly
-numpy
-pandas
-torch
-scikit-learn
-tqdm
+# Main deployable application dependencies.
+-r recommender_platform/requirements.txt

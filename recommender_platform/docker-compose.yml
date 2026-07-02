@@ -5,7 +5,7 @@ services:
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-admin}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-secretpassword}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change_me_local_password}
       POSTGRES_DB: ${POSTGRES_DB:-recommender_db}
     ports:
       - "${POSTGRES_PORT:-5432}:5432"
@@ -48,14 +48,21 @@ services:
       - "${API_PORT:-8000}:8000"
     restart: unless-stopped
     environment:
-      - DATABASE_URL=${DATABASE_URL:-postgresql://admin:secretpassword@db:5432/recommender_db}
+      - DATABASE_URL=${DATABASE_URL:-postgresql://admin:change_me_local_password@db:5432/recommender_db}
+      - PORT=8000
+      - ALLOWED_ORIGINS=${ALLOWED_ORIGINS:-http://localhost:5173,http://127.0.0.1:5173}
       - POSTGRES_USER=${POSTGRES_USER:-admin}
-      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-secretpassword}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-change_me_local_password}
       - POSTGRES_DB=${POSTGRES_DB:-recommender_db}
       - POSTGRES_HOST=${POSTGRES_HOST:-db}
       - POSTGRES_PORT=${POSTGRES_PORT:-5432}
       - QDRANT_HOST=${QDRANT_HOST:-qdrant}
       - QDRANT_PORT=${QDRANT_PORT:-6333}
+      - QDRANT_URL=${QDRANT_URL:-}
+      - QDRANT_API_KEY=${QDRANT_API_KEY:-}
+      - QDRANT_HTTPS=${QDRANT_HTTPS:-false}
+      - QDRANT_COLLECTION=${QDRANT_COLLECTION:-products}
+      - REDIS_ENABLED=${REDIS_ENABLED:-true}
       - REDIS_HOST=${REDIS_HOST:-redis}
       - REDIS_PORT=${REDIS_PORT:-6379}
       - SBERT_MODEL=${SBERT_MODEL:-all-MiniLM-L6-v2}

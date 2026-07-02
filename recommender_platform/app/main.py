@@ -14,26 +14,15 @@ from .ml.ranking.ranker import XGBRanker
 models.Base.metadata.create_all(bind=engine)
 
 app = FastAPI(
-    title="EliteRec SaaS Platform",
-    description="Production-grade Product Recommendation API",
+    title="EliteRec Product Recommendation API",
+    description="Content-based product recommendation API",
     version="1.0.0"
 )
 
 # Add CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",
-        "http://localhost:5174",
-        "http://localhost:5175",
-        "http://localhost:5176",
-        "http://localhost:5177",
-        "http://127.0.0.1:5173",
-        "http://127.0.0.1:5174",
-        "http://127.0.0.1:5175",
-        "http://127.0.0.1:5176",
-        "http://127.0.0.1:5177",
-    ],
+    allow_origins=settings.allowed_origins_list,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -80,4 +69,4 @@ def readiness_check():
 
 @app.get("/")
 def root():
-    return {"message": "Welcome to EliteRec SaaS Platform API"}
+    return {"message": "EliteRec Product Recommendation API"}

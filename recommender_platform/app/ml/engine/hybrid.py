@@ -1,16 +1,16 @@
 import numpy as np
 from typing import Any, Dict, List
 from sentence_transformers import SentenceTransformer
-from qdrant_client import QdrantClient
 from sklearn.metrics.pairwise import cosine_similarity
 
 from ...core.config import settings
+from ...core.qdrant import create_qdrant_client
 
 class HybridEngine:
     def __init__(self):
         self.sbert = SentenceTransformer(settings.SBERT_MODEL)
-        self.q_client = QdrantClient(host=settings.QDRANT_HOST, port=settings.QDRANT_PORT)
-        self.collection_name = "products"
+        self.q_client = create_qdrant_client()
+        self.collection_name = settings.QDRANT_COLLECTION
         
     def get_embedding(self, text: str) -> np.ndarray:
         return self.sbert.encode(text).tolist()

@@ -7,7 +7,6 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List
 
-from qdrant_client import QdrantClient
 from qdrant_client.http import models as qmodels
 from sentence_transformers import SentenceTransformer
 from sqlalchemy import func, text
@@ -18,11 +17,11 @@ from tqdm import tqdm
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app.core.config import settings
+from app.core.qdrant import create_qdrant_client
 from app.db import models
 from app.db.session import SessionLocal, engine
 
 
-COLLECTION_NAME = "products"
 EXPECTED_COLUMNS = [
     "product_id", "title", "brand", "category", "subcategory", "description",
     "features", "specifications", "keywords/tags", "price", "rating",
@@ -129,7 +128,7 @@ def _embedding_text(row: Dict[str, Any]) -> str:
 
 def _reset_catalog(db: Session, qdrant: QdrantClient, vector_size: int) -> None:
     qdrant.recreate_collection(
-        collection_name=COLLECTION_NAME,
+        collection_name=settings.QDRANT_COLLECTION,
         vectors_config=qmodels.VectorParams(
             size=vector_size,
             distance=qmodels.Distance.COSINE,
@@ -156,7 +155,7 @@ def _write_batch(
         show_progress_bar=False,
     ).tolist()
     qdrant.upsert(
-        collection_name=COLLECTION_NAME,
+        collection_name=settings.QDRANT_COLLECTION,
         points=[
             qmodels.PointStruct(
                 id=_point_id(row["product_id"]),
@@ -208,7 +207,7 @@ def _verify(db: Session, qdrant: QdrantClient, expected: int) -> None:
     db_count = int(db.query(func.count(models.Item.id)).scalar() or 0)
     distinct_products = int(db.query(func.count(func.distinct(models.Item.product_id))).scalar() or 0)
     categories = int(db.query(func.count(func.distinct(models.Item.category))).scalar() or 0)
-    qdrant_count = int(qdrant.count(collection_name=COLLECTION_NAME, exact=True).count)
+    qdrant_count = int(qdrant.count(collection_name=settings.QDRANT_COLLECTION, exact=True).count)
     missing_enrichment = int(db.execute(text("""
         SELECT count(*) FROM items
         WHERE product_id IS NULL OR brand IS NULL OR subcategory IS NULL
@@ -234,7 +233,7 @@ def _verify(db: Session, qdrant: QdrantClient, expected: int) -> None:
 def import_enriched(csv_path: Path, batch_size: int, embedding_batch_size: int) -> None:
     models.Base.metadata.create_all(bind=engine)
     db: Session = SessionLocal()
-    qdrant = QdrantClient(host=settings.QDRANT_HOST, port=settings.QDRANT_PORT)
+    qdrant = create_qdrant_client()
     try:
         _migrate_schema(db)
         bought_counts = dict(db.query(models.Item.asin, models.Item.bought_in_last_month).all())

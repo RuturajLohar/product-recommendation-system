@@ -208,5 +208,25 @@ __marimo__/
 
 # Project-local runtime assets
 recommender_platform/data/*.csv
+recommender_platform/data/*.xlsx
+recommender_platform/data/*.xls
+recommender_platform/data/*.parquet
+recommender_platform/data/*.jsonl
 recommender_platform/.env
+recommender_platform/.env.*
+!recommender_platform/.env.example
 recommender_platform/frontend-react/.env
+recommender_platform/frontend-react/.env.*
+!recommender_platform/frontend-react/.env.example
+recommender_platform/frontend-react/node_modules/
+recommender_platform/frontend-react/dist/
+recommender_platform/embeddings/
+recommender_platform/faiss_indexes/
+recommender_platform/models/
+
+# Large generated recommendation artifacts
+*.pkl
+*.npy
+*.bin
+artifacts/
+universal_artifacts/
